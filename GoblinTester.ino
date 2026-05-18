@@ -1,20 +1,29 @@
-const int phoneSensorPin=2;
-const int breakButtonPin=3;
+const int obstaclePin=2;
 const int greenLedPin=6;
 const int redLedPin=5;
 const int buzzerPin=9;
+const int segA=3;
+const int segB=4;
+const int segC=7;
+const int segD=8;
+const int segE=10;
+const int segF=11;
+const int segG=12;
+const bool obstacleActiveLow=true;
+const bool commonAnode=false;
 int goblinPoints=0;
 int pickupCount=0;
-bool phoneWasPresent=false;
-bool breakWasPressed=false;
-unsigned long lastPickupTime=0;
+bool phoneWasThere=false;
+
 unsigned long previousPickupTime=0;
 unsigned long focusStartTime=0;
-unsigned long lastButtonPress=0;
+unsigned long lastSensorChange=0;
+bool lastRawPhone=false;
+bool phoneThere=false;
+
 const unsigned long focusInterval=3600000;
 const unsigned long spamPickupLimit=5000;
-const unsigned long debounceDelay=500;
-
+const unsigned long sensorDelay=120;
 void beep(int onTime,int offTime){
   digitalWrite(buzzerPin,HIGH);
   delay(onTime);
@@ -22,13 +31,10 @@ void beep(int onTime,int offTime){
   delay(offTime);
 }
 void sadTrombone(){
-  beep(200,100);
-  beep(200,100);
-  beep(600,0);
+  beep(200,100);beep(200,100);beep(600,0);
 }
 void surprise(){
-  beep(80,40);
-  beep(700,0);
+  beep(80,40);beep(700,0);
 }
 void angryChicken(){
   for(int i=0;i<10;i++)beep(30,30);
@@ -40,9 +46,7 @@ void alarmSiren(){
   }
 }
 void victoryJingle(){
-  beep(150,80);
-  beep(150,80);
-  beep(500,0);
+  beep(150,80);beep(150,80);beep(500,0);
 }
 void flashLed(int pin,int timeOn){
   digitalWrite(pin,HIGH);
@@ -50,98 +54,113 @@ void flashLed(int pin,int timeOn){
   digitalWrite(pin,LOW);
 }
 
-void printGoblinLevel(){
-  Serial.print("Goblin points: ");
-  Serial.println(goblinPoints);
-  if(goblinPoints<=2)Serial.println("Human");
-  else if(goblinPoints<=5)Serial.println("Slight Goblin");
-  else if(goblinPoints<=9)Serial.println("Full Goblin");
-  else Serial.println("DOOMSCROLL BEAST");
+bool readPhoneSensor(){
+  int v=digitalRead(obstaclePin);
+  if(obstacleActiveLow)return v==LOW;
+  return v==HIGH;
 }
-void handlePickup(unsigned long currentTime){
-  Serial.println("Phone picked up");
+void segWrite(int pin,bool on){
+  if(commonAnode)digitalWrite(pin,on?LOW:HIGH);
+  else digitalWrite(pin,on?HIGH:LOW);
+}
+void showDigit(int n){
+  if(n<0)n=0;
+  if(n>9)n=9;
+  bool nums[10][7]={
+    {1,1,1,1,1,1,0},
+    {0,1,1,0,0,0,0},
+    {1,1,0,1,1,0,1},
+    {1,1,1,1,0,0,1},
+    {0,1,1,0,0,1,1},
+    {1,0,1,1,0,1,1},
+    {1,0,1,1,1,1,1},
+    {1,1,1,0,0,0,0},
+    {1,1,1,1,1,1,1},
+    {1,1,1,1,0,1,1}
+  };
+  segWrite(segA,nums[n][0]);segWrite(segB,nums[n][1]);segWrite(segC,nums[n][2]);
+  segWrite(segD,nums[n][3]);segWrite(segE,nums[n][4]);segWrite(segF,nums[n][5]);segWrite(segG,nums[n][6]);
+}
+void printLevel(){
+  Serial.print("points ");Serial.println(goblinPoints);
+  if(goblinPoints<=2)Serial.println("human");
+  else if(goblinPoints<=5)Serial.println("little goblin");
+  else if(goblinPoints<=9)Serial.println("full goblin");
+  else Serial.println("doomscroll beast");
+}
+void setPoints(int n){
+  goblinPoints=n;
+  if(goblinPoints<0)goblinPoints=0;
+  showDigit(goblinPoints);
+}
+void phoneTaken(unsigned long t){
+  Serial.println("phone taken");
   pickupCount++;
-  goblinPoints++;
-  bool pickedUpTooSoon=previousPickupTime>0&&currentTime-previousPickupTime<spamPickupLimit;
-  if(pickedUpTooSoon){
-    goblinPoints+=2;
-    Serial.println("Spam pickup");
-    alarmSiren();
-    flashLed(redLedPin,300);
+  setPoints(goblinPoints+1);
+
+  bool tooFast=previousPickupTime>0&&t-previousPickupTime<spamPickupLimit;
+  if(tooFast){
+    setPoints(goblinPoints+2);
+    Serial.println("again too fast");
+    alarmSiren();flashLed(redLedPin,300);
   }
   else if(pickupCount>=10){
-    Serial.println("Doomscroll beast");
-    angryChicken();
-    flashLed(redLedPin,300);
+    Serial.println("too many times");
+    angryChicken();flashLed(redLedPin,300);
   }
   else if(pickupCount==7){
-    Serial.println("This is getting sad");
-    sadTrombone();
-    flashLed(redLedPin,300);
+    sadTrombone();flashLed(redLedPin,300);
   }
-  else if(pickupCount==5){
-    Serial.println("Suspicious");
-    surprise();
-  }
+  else if(pickupCount==5)surprise();
   else sadTrombone();
-  previousPickupTime=currentTime;
-  lastPickupTime=currentTime;
-  printGoblinLevel();
+
+  previousPickupTime=t;
+  printLevel();
 }
-void handleReturn(){
-  Serial.println("Phone returned");
-  victoryJingle();
-  flashLed(greenLedPin,500);
+void phoneBack(){
+  Serial.println("phone back");
+  victoryJingle();flashLed(greenLedPin,400);
 }
-void handleBreak(unsigned long currentTime){
-  if(currentTime-lastButtonPress<debounceDelay)return;
-  Serial.println("Break started");
-  goblinPoints-=3;
-  if(goblinPoints<0)goblinPoints=0;
+void focusHour(unsigned long t){
+  Serial.println("focus hour");
+  setPoints(goblinPoints-2);
   pickupCount=0;
   previousPickupTime=0;
-  lastButtonPress=currentTime;
-  victoryJingle();
-  flashLed(greenLedPin,500);
-  printGoblinLevel();
+  focusStartTime=t;
+  victoryJingle();flashLed(greenLedPin,500);
+  printLevel();
 }
-void handleFocusHour(unsigned long currentTime){
-  Serial.println("Focus hour completed");
-  goblinPoints-=2;
-  if(goblinPoints<0)goblinPoints=0;
-  focusStartTime=currentTime;
-  victoryJingle();
-  flashLed(greenLedPin,500);
-  printGoblinLevel();
-}
-
 void setup(){
-  pinMode(phoneSensorPin,INPUT_PULLUP);
-  pinMode(breakButtonPin,INPUT_PULLUP);
-  pinMode(greenLedPin,OUTPUT);
-  pinMode(redLedPin,OUTPUT);
-  pinMode(buzzerPin,OUTPUT);
-  digitalWrite(greenLedPin,LOW);
-  digitalWrite(redLedPin,LOW);
+  pinMode(obstaclePin,INPUT_PULLUP);
+  pinMode(greenLedPin,OUTPUT);pinMode(redLedPin,OUTPUT);pinMode(buzzerPin,OUTPUT);
+  pinMode(segA,OUTPUT);pinMode(segB,OUTPUT);pinMode(segC,OUTPUT);pinMode(segD,OUTPUT);
+  pinMode(segE,OUTPUT);pinMode(segF,OUTPUT);pinMode(segG,OUTPUT);
+
   Serial.begin(9600);
   focusStartTime=millis();
-  phoneWasPresent=digitalRead(phoneSensorPin);
-  Serial.println("Goblin Phone Jail started");
+  phoneThere=readPhoneSensor();
+  phoneWasThere=phoneThere;
+  lastRawPhone=phoneThere;
+  showDigit(0);
   victoryJingle();
 }
 void loop(){
-  bool phonePresent=digitalRead(phoneSensorPin);
-  bool breakPressed=digitalRead(breakButtonPin)==LOW;
-  unsigned long currentTime=millis();
-  if(phoneWasPresent&&!phonePresent)handlePickup(currentTime);
-  if(!phoneWasPresent&&phonePresent)handleReturn();
-  phoneWasPresent=phonePresent;
-  if(breakPressed&&!breakWasPressed)handleBreak(currentTime);
-  breakWasPressed=breakPressed;
-  if(currentTime-focusStartTime>=focusInterval)handleFocusHour(currentTime);
-  if(goblinPoints>=10){
-    flashLed(redLedPin,200);
-    delay(200);
+  unsigned long now=millis();
+  bool raw=readPhoneSensor();
+
+  if(raw!=lastRawPhone){
+    lastSensorChange=now;
+    lastRawPhone=raw;
   }
-  delay(50);
+  if(now-lastSensorChange>sensorDelay)phoneThere=raw;
+  if(phoneWasThere&&!phoneThere)phoneTaken(now);
+  if(!phoneWasThere&&phoneThere)phoneBack();
+  phoneWasThere=phoneThere;
+
+  if(now-focusStartTime>=focusInterval)focusHour(now);
+  if(goblinPoints>=10){
+    flashLed(redLedPin,150);
+    delay(150);
+  }
+  delay(30);
 }
